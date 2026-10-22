@@ -1,0 +1,228 @@
+"""
+Week 2: model design implementation - yield forecasting + crop recommendation.
+
+Input  : data/processed/crop_production_clean.csv      (output of agri_week1_eda.py)
+         data/processed/crop_recommendation_clean.csv
+Optional: data/external/weather.csv with columns
+         State_Name, District_Name, Crop_Year, rain_mm, temp_mean   (e.g. from NASA POWER)
+Output : reports/week2/metrics_yield.csv, metrics_crop_reco.csv, figures
+
+Run    : python week2_model_pipeline.py
+Needs  : pandas numpy scikit-learn matplotlib   (xgboost / lightgbm optional)
+"""
+import os
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
+from sklearn.linear_model import Ridge, LogisticRegression
+from sklearn.ensemble import (RandomForestRegressor, HistGradientBoostingRegressor,
+                              RandomForestClassifier, HistGradientBoostingClassifier)
+from sklearn.inspection import permutation_importance
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, f1_score, accuracy_score
+from sklearn.model_selection import StratifiedKFold, cross_validate
+
+warnings.filterwarnings("ignore")
+SEED = 42
+np.random.seed(SEED)
+PROC = "data/processed"
+EXT = "data/external/weather.csv"
+OUT = "reports/week2"
+os.makedirs(OUT, exist_ok=True)
+
+KEY = ["State_Name", "District_Name", "Crop", "Season"]
+CAT_COLS = ["State_Name", "Crop", "Season"]          # low cardinality
+HC_COLS = ["District_Name"]                          # high cardinality (ordinal code only)
+
+
+# ------------------------------------------------------------------ FEATURE ENGINEERING
+def build_yield_table(df):
+    """One row per district-crop-season-year; lag features use ONLY earlier years (no leakage)."""
+    d = df.dropna(subset=["Production", "Area"]).copy()
+    d = d[(d["Area"] > 0) & (d["Production"] >= 0)]
+    g = (d.groupby(KEY + ["Crop_Year"], as_index=False)[["Area", "Production"]].sum())
+    g["Yield"] = g["Production"] / g["Area"]
+    g["y"] = np.log1p(g["Yield"])                    # modelling target (log scale)
+    g["log_area"] = np.log1p(g["Area"])
+    g = g.sort_values(KEY + ["Crop_Year"]).reset_index(drop=True)
+
+    grp = g.groupby(KEY)["y"]
+    g["lag1_y"] = grp.shift(1)
+    g["lag2_y"] = grp.shift(2)
+    g["roll3_mean_y"] = grp.transform(lambda s: s.shift(1).rolling(3, min_periods=1).mean())
+    g["roll3_std_y"] = grp.transform(lambda s: s.shift(1).rolling(3, min_periods=2).std())
+    g["gap_years"] = g.groupby(KEY)["Crop_Year"].diff()
+    g["lag1_log_area"] = g.groupby(KEY)["log_area"].shift(1)
+    g["area_change"] = g["log_area"] - g["lag1_log_area"]
+
+    # historical regional benchmark: mean of all PREVIOUS years' log-yield in the state-crop
+    sc = g.groupby(["State_Name", "Crop", "Crop_Year"])["y"].agg(["sum", "count"]).reset_index()
+    sc = sc.sort_values(["State_Name", "Crop", "Crop_Year"])
+    sc["cs"] = sc.groupby(["State_Name", "Crop"])["sum"].cumsum() - sc["sum"]
+    sc["cc"] = sc.groupby(["State_Name", "Crop"])["count"].cumsum() - sc["count"]
+    sc["state_crop_hist_y"] = sc["cs"] / sc["cc"].replace(0, np.nan)
+    g = g.merge(sc[["State_Name", "Crop", "Crop_Year", "state_crop_hist_y"]],
+                on=["State_Name", "Crop", "Crop_Year"], how="left")
+
+    g["year_idx"] = g["Crop_Year"] - g["Crop_Year"].min()   # slow technology / practice trend
+
+    if os.path.exists(EXT):                           # optional weather enrichment
+        w = pd.read_csv(EXT)
+        g = g.merge(w, on=["State_Name", "District_Name", "Crop_Year"], how="left")
+        print("Weather features merged:", [c for c in w.columns if c not in KEY])
+    return g
+
+
+def feature_lists(g):
+    num = ["log_area", "year_idx", "lag1_y", "lag2_y", "roll3_mean_y", "roll3_std_y",
+           "gap_years", "area_change", "state_crop_hist_y"]
+    num += [c for c in ["rain_mm", "temp_mean"] if c in g.columns]
+    return num
+
+
+# ------------------------------------------------------------------ MODELS
+def make_models(num_cols):
+    n_cat, n_hc = len(CAT_COLS), len(HC_COLS)
+
+    def ordinal_pre():
+        return ColumnTransformer([
+            ("cat", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1), CAT_COLS),
+            ("hc", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1), HC_COLS),
+            ("num", SimpleImputer(strategy="median"), num_cols)])
+
+    ridge_pre = ColumnTransformer([
+        ("cat", OneHotEncoder(handle_unknown="ignore"), CAT_COLS),
+        ("num", Pipeline([("imp", SimpleImputer(strategy="median")), ("sc", StandardScaler())]), num_cols)])
+
+    hgb_pre = ColumnTransformer([
+        ("cat", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=np.nan), CAT_COLS),
+        ("hc", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=np.nan), HC_COLS),
+        ("num", "passthrough", num_cols)])
+
+    models = {
+        "Ridge (linear baseline)": Pipeline([("pre", ridge_pre), ("m", Ridge(alpha=1.0))]),
+        "Random Forest": Pipeline([("pre", ordinal_pre()),
+                                   ("m", RandomForestRegressor(n_estimators=300, min_samples_leaf=3,
+                                                               max_features=0.5, n_jobs=-1, random_state=SEED))]),
+        "Gradient Boosting (HistGB)": Pipeline([("pre", hgb_pre),
+                                                ("m", HistGradientBoostingRegressor(
+                                                    learning_rate=0.05, max_iter=500, max_leaf_nodes=31,
+                                                    min_samples_leaf=40, l2_regularization=1.0,
+                                                    categorical_features=list(range(n_cat)),
+                                                    early_stopping=True, validation_fraction=0.1,
+                                                    random_state=SEED))]),
+    }
+    try:                                              # optional drop-in alternatives
+        from xgboost import XGBRegressor
+        models["XGBoost (optional)"] = Pipeline([("pre", ordinal_pre()),
+            ("m", XGBRegressor(n_estimators=600, learning_rate=0.05, max_depth=6, subsample=0.8,
+                               colsample_bytree=0.8, random_state=SEED, n_jobs=-1))])
+    except ImportError:
+        pass
+    return models
+
+
+# ------------------------------------------------------------------ EVALUATION
+def scores(y_true_log, y_pred_log):
+    yt, yp = np.expm1(y_true_log), np.expm1(np.clip(y_pred_log, 0, None))
+    return {"RMSE_log": mean_squared_error(y_true_log, y_pred_log) ** 0.5,
+            "MAE_log": mean_absolute_error(y_true_log, y_pred_log),
+            "R2_log": r2_score(y_true_log, y_pred_log),
+            "RMSE_yield": mean_squared_error(yt, yp) ** 0.5,
+            "MAE_yield": mean_absolute_error(yt, yp),
+            "MAPE_%": float(np.mean(np.abs(yt - yp) / np.maximum(yt, 1e-6)) * 100)}
+
+
+def expanding_window_cv(g, models, feats, n_folds=3):
+    """Train on all years < T, test on year block T. Mirrors real forecasting."""
+    years = sorted(g["Crop_Year"].unique())
+    test_blocks = np.array_split(years[-(n_folds * 2):], n_folds)
+    rows = []
+    for k, block in enumerate(test_blocks, 1):
+        tr, te = g[g["Crop_Year"] < block.min()], g[g["Crop_Year"].isin(block)]
+        te = te[te["lag1_y"].notna()]                 # need history to forecast
+        for name, mdl in models.items():
+            mdl.fit(tr[feats], tr["y"])
+            rows.append({"fold": k, "test_years": f"{block.min()}-{block.max()}", "model": name,
+                         **scores(te["y"], mdl.predict(te[feats]))})
+        # naive persistence baseline: last observed yield
+        rows.append({"fold": k, "test_years": f"{block.min()}-{block.max()}", "model": "Persistence (lag1)",
+                     **scores(te["y"], te["lag1_y"])})
+    return pd.DataFrame(rows)
+
+
+def run_yield(path):
+    raw = pd.read_csv(path)
+    g = build_yield_table(raw)
+    num = feature_lists(g)
+    feats = CAT_COLS + HC_COLS + num
+    models = make_models(num)
+
+    cv = expanding_window_cv(g, models, feats)
+    summary = cv.groupby("model")[["RMSE_log", "MAE_log", "R2_log", "MAE_yield", "MAPE_%"]].mean().sort_values("RMSE_log")
+    summary.to_csv(f"{OUT}/metrics_yield.csv")
+    print("\nYield forecasting - mean over expanding-window folds:\n", summary.round(4))
+
+    # final holdout = last 2 years; plots + permutation importance for best model
+    last = sorted(g["Crop_Year"].unique())[-2:]
+    tr, te = g[~g["Crop_Year"].isin(last)], g[g["Crop_Year"].isin(last) & g["lag1_y"].notna()]
+    best_name = summary.index[summary.index.isin(models.keys())][0]
+    best = models[best_name].fit(tr[feats], tr["y"])
+    pred = best.predict(te[feats])
+    plt.figure(figsize=(5.5, 5))
+    plt.scatter(te["y"], pred, s=6, alpha=0.4)
+    lim = [min(te["y"].min(), pred.min()), max(te["y"].max(), pred.max())]
+    plt.plot(lim, lim, "r--"); plt.xlabel("Actual log1p(yield)"); plt.ylabel("Predicted")
+    plt.title(f"Holdout {last[0]}-{last[1]}: {best_name}")
+    plt.tight_layout(); plt.savefig(f"{OUT}/pred_vs_actual.png", dpi=150); plt.close()
+
+    sample = te.sample(min(3000, len(te)), random_state=SEED)
+    pi = permutation_importance(best, sample[feats], sample["y"], n_repeats=5, random_state=SEED,
+                                scoring="neg_root_mean_squared_error")
+    imp = pd.Series(pi.importances_mean, index=feats).sort_values()
+    imp.plot.barh(figsize=(6, 5), title="Permutation importance (RMSE increase)")
+    plt.tight_layout(); plt.savefig(f"{OUT}/permutation_importance.png", dpi=150); plt.close()
+
+    # per-crop error to reveal where the model is weak
+    te = te.assign(abs_err=np.abs(te["y"] - pred))
+    te.groupby("Crop")["abs_err"].mean().sort_values(ascending=False).head(15).to_csv(f"{OUT}/error_by_crop.csv")
+
+    # prediction intervals via quantile gradient boosting (uncertainty for planning)
+    lo = HistGradientBoostingRegressor(loss="quantile", quantile=0.1, random_state=SEED)
+    hi = HistGradientBoostingRegressor(loss="quantile", quantile=0.9, random_state=SEED)
+    pre = models["Gradient Boosting (HistGB)"].named_steps["pre"]
+    Xtr, Xte = pre.fit_transform(tr[feats]), pre.transform(te[feats])
+    lo.fit(Xtr, tr["y"]); hi.fit(Xtr, tr["y"])
+    cover = float(np.mean((te["y"] >= lo.predict(Xte)) & (te["y"] <= hi.predict(Xte))))
+    print(f"80% prediction interval coverage on holdout: {cover:.2%} (target ~80%)")
+
+
+def run_crop_reco(path):
+    df = pd.read_csv(path)
+    X, y = df.drop(columns="label"), df["label"]
+    cv = StratifiedKFold(5, shuffle=True, random_state=SEED)
+    models = {
+        "Logistic Regression": Pipeline([("sc", StandardScaler()), ("m", LogisticRegression(max_iter=2000))]),
+        "Random Forest": RandomForestClassifier(n_estimators=300, random_state=SEED, n_jobs=-1),
+        "Gradient Boosting (HistGB)": HistGradientBoostingClassifier(random_state=SEED),
+    }
+    rows = []
+    for name, m in models.items():
+        r = cross_validate(m, X, y, cv=cv, scoring=["accuracy", "f1_macro"])
+        rows.append({"model": name, "accuracy": r["test_accuracy"].mean(), "macro_F1": r["test_f1_macro"].mean(),
+                     "macro_F1_std": r["test_f1_macro"].std()})
+    res = pd.DataFrame(rows).sort_values("macro_F1", ascending=False)
+    res.to_csv(f"{OUT}/metrics_crop_reco.csv", index=False)
+    print("\nCrop recommendation - 5-fold stratified CV:\n", res.round(4))
+
+
+if __name__ == "__main__":
+    p1, p2 = f"{PROC}/crop_production_clean.csv", f"{PROC}/crop_recommendation_clean.csv"
+    run_yield(p1) if os.path.exists(p1) else print("Missing", p1)
+    run_crop_reco(p2) if os.path.exists(p2) else print("Missing", p2)
