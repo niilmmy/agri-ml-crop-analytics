@@ -1,0 +1,177 @@
+# Week 3: Feature Engineering and Data Transformation
+# Agricultural Crop Yield Prediction
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+# 1. Load agricultural dataset
+df = pd.read_csv("data/agricultural_data.csv")
+
+# Expected columns:
+# crop, district, soil_ph, soil_moisture, nitrogen, phosphorus,
+# potassium, rainfall_mm, temperature_c, humidity, irrigation_mm,
+# fertilizer_kg, pesticide_liters, cultivated_area_hectares,
+# crop_yield_tonnes
+
+# 2. Data cleaning
+df.columns = df.columns.str.strip().str.lower()
+df = df.drop_duplicates()
+
+target = "crop_yield_tonnes"
+
+df[target] = pd.to_numeric(df[target], errors="coerce")
+df = df.dropna(subset=[target])
+df = df[df[target] >= 0]
+
+numeric_columns = [
+    "soil_ph", "soil_moisture", "nitrogen", "phosphorus",
+    "potassium", "rainfall_mm", "temperature_c", "humidity",
+    "irrigation_mm", "fertilizer_kg", "pesticide_liters",
+    "cultivated_area_hectares"
+]
+
+for col in numeric_columns:
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = df[col].replace([np.inf, -np.inf], np.nan)
+
+# 3. Feature engineering
+
+# Feature 1: Total soil nutrient availability
+nutrient_cols = ["nitrogen", "phosphorus", "potassium"]
+if all(c in df.columns for c in nutrient_cols):
+    df["total_soil_nutrients"] = df[nutrient_cols].sum(
+        axis=1, min_count=len(nutrient_cols)
+    )
+
+# Feature 2: Rainfall-to-irrigation water availability
+if {"rainfall_mm", "irrigation_mm"}.issubset(df.columns):
+    df["total_water_mm"] = (
+        df["rainfall_mm"] + df["irrigation_mm"]
+    )
+
+# Feature 3: Temperature-humidity interaction
+if {"temperature_c", "humidity"}.issubset(df.columns):
+    df["temperature_humidity_interaction"] = (
+        df["temperature_c"] * df["humidity"]
+    )
+
+# Feature 4: Fertilizer application intensity
+if {"fertilizer_kg", "cultivated_area_hectares"}.issubset(df.columns):
+    area = df["cultivated_area_hectares"].replace(0, np.nan)
+    df["fertilizer_per_hectare"] = df["fertilizer_kg"] / area
+
+# Feature 5: Pesticide application intensity
+if {"pesticide_liters", "cultivated_area_hectares"}.issubset(df.columns):
+    area = df["cultivated_area_hectares"].replace(0, np.nan)
+    df["pesticide_per_hectare"] = df["pesticide_liters"] / area
+
+# Feature 6: Log transformation for skewed input variables
+for col in ["rainfall_mm", "fertilizer_kg", "pesticide_liters"]:
+    if col in df.columns:
+        df[f"log_{col}"] = np.log1p(df[col].clip(lower=0))
+
+# Feature 7: Soil pH deviation from neutral
+if "soil_ph" in df.columns:
+    df["soil_ph_deviation"] = (df["soil_ph"] - 7).abs()
+
+# Feature 8: Water availability per hectare
+if {"total_water_mm", "cultivated_area_hectares"}.issubset(df.columns):
+    area = df["cultivated_area_hectares"].replace(0, np.nan)
+    df["water_per_hectare"] = df["total_water_mm"] / area
+
+# Remove invalid engineered values
+df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+# 4. Select available features
+categorical_features = [
+    c for c in ["crop", "district"] if c in df.columns
+]
+
+candidate_numeric = numeric_columns + [
+    "total_soil_nutrients",
+    "total_water_mm",
+    "temperature_humidity_interaction",
+    "fertilizer_per_hectare",
+    "pesticide_per_hectare",
+    "log_rainfall_mm",
+    "log_fertilizer_kg",
+    "log_pesticide_liters",
+    "soil_ph_deviation",
+    "water_per_hectare"
+]
+
+numeric_features = [
+    c for c in dict.fromkeys(candidate_numeric)
+    if c in df.columns and c != target
+]
+
+feature_columns = numeric_features + categorical_features
+
+if not feature_columns:
+    raise ValueError("No usable features found. Check dataset column names.")
+
+X = df[feature_columns]
+y = df[target]
+
+# 5. Preprocessing pipelines
+numeric_pipeline = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler())
+])
+
+categorical_pipeline = Pipeline([
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("encoder", OneHotEncoder(handle_unknown="ignore"))
+])
+
+preprocessor = ColumnTransformer([
+    ("numeric", numeric_pipeline, numeric_features),
+    ("categorical", categorical_pipeline, categorical_features)
+])
+
+# 6. Split data
+# If a season/year column is available, use a chronological split instead.
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+# 7. Train model
+model = Pipeline([
+    ("preprocessor", preprocessor),
+    ("regressor", RandomForestRegressor(
+        n_estimators=300,
+        max_depth=None,
+        min_samples_leaf=2,
+        random_state=42,
+        n_jobs=-1
+    ))
+])
+
+model.fit(X_train, y_train)
+
+# 8. Evaluate model
+predictions = model.predict(X_test)
+
+print("Model Evaluation")
+print("----------------")
+print(f"MAE:  {mean_absolute_error(y_test, predictions):.3f}")
+print(f"RMSE: {np.sqrt(mean_squared_error(y_test, predictions)):.3f}")
+print(f"R2:   {r2_score(y_test, predictions):.3f}")
+
+# 9. Save transformed dataset
+df.to_csv("data/engineered_agricultural_data.csv", index=False)
+
+# 10. Save trained pipeline
+import joblib
+
+joblib.dump(model, "agricultural_yield_model.joblib")
+
+print("Feature engineering and model training completed.")
