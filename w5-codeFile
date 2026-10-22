@@ -1,0 +1,314 @@
+"""
+Week 5 Task: Deployment & Monitoring Strategy Documentation
+Agricultural Crop Yield Prediction using Machine Learning
+
+Install dependency:
+    pip install python-docx
+
+Run:
+    python week5_deployment_monitoring.py
+
+Output:
+    Week5_Deployment_Monitoring_Strategy.docx
+"""
+
+from docx import Document
+from docx.shared import Inches, Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+
+
+OUTPUT_FILE = "Week5_Deployment_Monitoring_Strategy.docx"
+
+
+def shade_cell(cell, fill="D9EAF7"):
+    """Apply background shading to a table cell."""
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:fill"), fill)
+    tc_pr.append(shd)
+
+
+def set_cell_text(cell, text, bold=False):
+    cell.text = str(text)
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    for paragraph in cell.paragraphs:
+        for run in paragraph.runs:
+            run.bold = bold
+            run.font.size = Pt(9)
+
+
+def add_table(document, headers, rows):
+    table = document.add_table(rows=1, cols=len(headers))
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+    for i, header in enumerate(headers):
+        set_cell_text(table.rows[0].cells[i], header, bold=True)
+        shade_cell(table.rows[0].cells[i])
+
+    for row in rows:
+        cells = table.add_row().cells
+        for i, value in enumerate(row):
+            set_cell_text(cells[i], value)
+
+    document.add_paragraph()
+    return table
+
+
+def add_bullets(document, items):
+    for item in items:
+        document.add_paragraph(item, style="List Bullet")
+
+
+def add_numbered(document, items):
+    for item in items:
+        document.add_paragraph(item, style="List Number")
+
+
+def add_heading(document, text, level=1):
+    document.add_heading(text, level=level)
+
+
+def create_document():
+    doc = Document()
+
+    section = doc.sections[0]
+    section.top_margin = Inches(0.7)
+    section.bottom_margin = Inches(0.7)
+    section.left_margin = Inches(0.8)
+    section.right_margin = Inches(0.8)
+
+    styles = doc.styles
+    styles["Normal"].font.name = "Arial"
+    styles["Normal"].font.size = Pt(10)
+    styles["Normal"].paragraph_format.space_after = Pt(6)
+
+    for style_name in ["Heading 1", "Heading 2", "Heading 3"]:
+        styles[style_name].font.name = "Arial"
+        styles[style_name].font.color.rgb = RGBColor(31, 78, 121)
+
+    # Cover page
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run(
+        "DEPLOYMENT AND MONITORING STRATEGY\n"
+        "FOR AGRICULTURAL CROP YIELD PREDICTION"
+    )
+    run.bold = True
+    run.font.name = "Arial"
+    run.font.size = Pt(21)
+    run.font.color.rgb = RGBColor(31, 78, 121)
+
+    subtitle = doc.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle.add_run(
+        "\nWeek 5 Task: Production Deployment, Monitoring, Risk Management "
+        "and Future Enhancements"
+    ).italic = True
+
+    doc.add_paragraph("\n")
+    info = doc.add_paragraph()
+    info.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    info.add_run(
+        "Application: Machine Learning for Agricultural Crop Yield Prediction\n"
+        "Model: Random Forest Regression (baseline; replace if evaluation "
+        "identifies a better model)\n"
+        "Document Type: Technical Deployment Strategy"
+    )
+
+    doc.add_page_break()
+
+    # 1. Executive summary
+    add_heading(doc, "1. Executive Summary")
+    doc.add_paragraph(
+        "This document presents a practical strategy for deploying and "
+        "maintaining a machine learning system that predicts agricultural crop "
+        "yield using historical yield records, soil properties, weather "
+        "observations, irrigation, fertilizer usage, and crop-management data. "
+        "The system is intended to support farmers, agronomists, agricultural "
+        "organizations, and planners with timely, evidence-based estimates."
+    )
+    doc.add_paragraph(
+        "The proposed architecture separates data collection, validation, "
+        "feature engineering, model inference, user access, monitoring, and "
+        "model maintenance. Deployment begins with a controlled pilot and "
+        "expands only after reliability, usability, and operational readiness "
+        "have been demonstrated. Predictions are decision-support estimates, "
+        "not guarantees of actual harvest outcomes."
+    )
+
+    add_heading(doc, "2. Project Objectives and Scope")
+    add_bullets(doc, [
+        "Deploy a reproducible crop-yield prediction pipeline in a secure and scalable environment.",
+        "Integrate predictions with existing agricultural databases, farm-management tools, and weather services where available.",
+        "Provide a simple interface for farmers, field officers, and agricultural analysts.",
+        "Monitor data quality, prediction performance, service availability, latency, and model drift.",
+        "Establish clear processes for incident response, retraining, rollback, and system recovery.",
+        "Reduce unnecessary compute and data-transfer costs while supporting sustainable agricultural operations."
+    ])
+
+    add_heading(doc, "3. Proposed System Architecture")
+    doc.add_paragraph(
+        "The production workflow follows this sequence: data sources → "
+        "data ingestion and validation → feature engineering → versioned model "
+        "inference → prediction API → user interface or existing agricultural "
+        "system → monitoring and feedback. Training and production inference "
+        "should be separate processes so that model updates can be tested "
+        "without disrupting active users."
+    )
+    add_table(doc, ["Component", "Purpose", "Implementation Options"], [
+        ("Data sources", "Collect soil, weather, crop, irrigation, fertilizer, and historical yield data.", "Farm records, CSV uploads, sensors, weather APIs, agricultural databases"),
+        ("Data ingestion", "Import, validate, timestamp, and standardize incoming records.", "Scheduled Python jobs, REST APIs, message queues"),
+        ("Storage", "Maintain raw records, cleaned datasets, predictions, and audit logs.", "Relational database, object storage, managed cloud storage"),
+        ("Feature pipeline", "Apply the same transformations used during model training.", "Version-controlled Python pipeline"),
+        ("Model service", "Load the approved model and generate predictions.", "REST API using FastAPI or Flask; batch inference"),
+        ("User interface", "Display predictions, uncertainty where available, and data-quality warnings.", "Responsive web dashboard or mobile-friendly application"),
+        ("Monitoring", "Track service health, data quality, drift, and model performance.", "Structured logs, metrics dashboard, alerting"),
+        ("Model registry", "Record model versions, evaluation results, and release status.", "Versioned artifacts and a model registry")
+    ])
+
+    # 4. Deployment planning
+    add_heading(doc, "4. Deployment Planning")
+    add_heading(doc, "4.1 Step-by-Step Deployment Process", level=2)
+    add_numbered(doc, [
+        "Confirm requirements: identify target crops, regions, users, prediction frequency, connectivity constraints, and operational decision points.",
+        "Audit and prepare data: check completeness, units, duplicates, timestamps, crop labels, geographical coverage, and target-variable quality.",
+        "Finalize the model: compare candidate models using appropriate holdout data and select a model based on predictive quality, robustness, interpretability, and operational cost.",
+        "Package preprocessing and inference: bundle the trained estimator, feature transformations, schema, dependency versions, and model metadata as a versioned release.",
+        "Create a staging environment: mirror production configuration and test valid inputs, missing fields, extreme values, invalid units, and service failures.",
+        "Run integration tests: verify data ingestion, API responses, authentication, user interface behavior, logging, and connections to external systems.",
+        "Conduct a pilot: deploy to a small number of farms or field officers, compare predictions with observed outcomes when available, and collect user feedback.",
+        "Approve production release: confirm performance thresholds, security checks, recovery procedures, documentation, and responsible staff ownership.",
+        "Roll out gradually: use a limited release or canary deployment before expanding to all intended users.",
+        "Review and improve: assess real-world performance, incidents, adoption, cost, and fairness across crops, regions, and farm sizes."
+    ])
+
+    add_heading(doc, "4.2 Hardware Requirements", level=2)
+    add_table(doc, ["Environment", "Suggested Resources", "Notes"], [
+        ("Development", "Developer laptop or workstation, 8–16 GB RAM", "Suitable for data exploration and initial model development; requirements depend on dataset size."),
+        ("Pilot inference", "Small virtual machine or existing server, 2–4 vCPUs and 4–8 GB RAM", "Validate actual memory and latency before final sizing."),
+        ("Production service", "Scalable virtual machine or container service, initially 2–4 vCPUs and 4–8 GB RAM", "Scale based on measured traffic, model size, and availability targets."),
+        ("Edge or offline use", "Field laptop, tablet, or supported local device", "Use cached or local inference only if the model and dependencies fit the device."),
+        ("Storage and backup", "Encrypted persistent storage with automated backup", "Capacity should reflect data retention, prediction history, and audit requirements.")
+    ])
+    doc.add_paragraph(
+        "These are initial planning estimates, not fixed specifications. "
+        "A tree-based regression model commonly runs on CPU hardware; a GPU "
+        "should be considered only if measured workloads justify it."
+    )
+
+    add_heading(doc, "4.3 Software and Platform Requirements", level=2)
+    add_bullets(doc, [
+        "Python with pinned dependency versions and a reproducible environment.",
+        "A version-controlled repository for application code, configuration, tests, and documentation.",
+        "A serialized preprocessing-and-model pipeline with explicit feature names and data types.",
+        "A REST API using FastAPI or Flask, with input validation and structured error responses.",
+        "A database or object store for approved datasets, prediction history, model artifacts, and audit records.",
+        "Containerization where useful to improve reproducibility and simplify deployment.",
+        "Automated tests and continuous integration for code quality, dependency checks, and release validation.",
+        "Centralized logs, service metrics, health checks, and backup/restore procedures."
+    ])
+
+    add_heading(doc, "4.4 Cloud, On-Premises, and Hybrid Options", level=2)
+    add_table(doc, ["Option", "Advantages", "Limitations and Use Cases"], [
+        ("Cloud deployment", "Managed databases, elastic capacity, remote access, managed monitoring and backups.", "Requires dependable connectivity, cost controls, and review of data residency and provider dependency."),
+        ("On-premises deployment", "Greater local control and potential operation within an existing organization network.", "Requires local IT support, patching, hardware maintenance, and disaster recovery."),
+        ("Hybrid deployment", "Cloud training and central monitoring with local or edge inference.", "More complex synchronization, version management, and offline conflict handling."),
+        ("Batch-only deployment", "Efficient for periodic seasonal forecasts and large data volumes.", "Predictions are not immediately available for every user request.")
+    ])
+    doc.add_paragraph(
+        "The recommended starting point is a managed cloud or existing "
+        "organizational server with scheduled batch inference and an API where "
+        "needed. A hybrid or offline-capable approach should be introduced when "
+        "field connectivity or data-governance requirements justify it."
+    )
+
+    # 5. Integration
+    add_heading(doc, "5. Integration with Existing Agricultural Systems")
+    add_heading(doc, "5.1 Integration Methods", level=2)
+    add_bullets(doc, [
+        "REST API: expose a documented endpoint that accepts validated crop, soil, weather, and management features and returns a yield estimate, model version, and status.",
+        "Database integration: use approved read-only access or scheduled exports to ingest farm records; write predictions to a separate table with timestamps and provenance.",
+        "CSV and spreadsheet exchange: provide templates for organizations that cannot support APIs, including required columns, units, and validation messages.",
+        "Weather integration: connect to an approved weather data source and store source, retrieval time, units, and missing-data indicators.",
+        "Sensor integration: ingest soil moisture, temperature, and other measurements through a gateway or scheduled batch process; apply calibration and quality checks.",
+        "Farm-management platforms: exchange crop plans, field identifiers, irrigation records, and yield observations using agreed schemas.",
+        "Government or research systems: use documented interfaces and data-sharing agreements; avoid unauthorized collection or transfer of sensitive farm data."
+    ])
+
+    add_heading(doc, "5.2 API Input and Output Design", level=2)
+    add_table(doc, ["Field", "Description"], [
+        ("field_id", "Pseudonymous or organization-approved field identifier"),
+        ("crop_type", "Crop category using a standardized vocabulary"),
+        ("season_year", "Growing season or year associated with the prediction"),
+        ("soil_features", "Available soil measurements with units and collection dates"),
+        ("weather_features", "Historical or forecast variables with source and time window"),
+        ("management_features", "Irrigation, fertilizer, planting, and other approved inputs"),
+        ("predicted_yield", "Estimated yield in a clearly stated unit, such as tonnes per hectare"),
+        ("model_version", "Identifier for the approved model used for inference"),
+        ("prediction_timestamp", "Time at which the prediction was generated"),
+        ("quality_status", "Indicates whether inputs passed validation or require review")
+    ])
+    doc.add_paragraph(
+        "The exact input schema must match the features expected by the "
+        "trained model. Missing required features, unsupported categories, "
+        "invalid units, or out-of-range values should produce a clear validation "
+        "message rather than a silent or misleading prediction."
+    )
+
+    add_heading(doc, "5.3 User Interface Considerations", level=2)
+    add_bullets(doc, [
+        "Use a responsive, mobile-friendly layout suitable for field use.",
+        "Support simple language, local-language labels where feasible, and clear units.",
+        "Display predicted yield, prediction date, crop and field context, and the model version.",
+        "Show warnings when input data are incomplete, stale, outside the training range, or otherwise unreliable.",
+        "Explain that predictions are estimates and show a calibrated uncertainty range only if the model has been validated to provide one.",
+        "Offer accessible charts comparing predictions with historical yields and observed harvest results.",
+        "Support low-bandwidth use, draft saving, and offline data capture where operationally necessary.",
+        "Provide a feedback option for recording actual yield and reporting incorrect or confusing results."
+    ])
+
+    # 6 monitoring
+    add_heading(doc, "6. Monitoring Strategy")
+    doc.add_paragraph(
+        "Monitoring should cover system health, incoming data, prediction "
+        "behavior, and realized model accuracy. Because actual harvest results "
+        "may become available only after a growing season, immediate service "
+        "monitoring and delayed outcome-based evaluation must be managed "
+        "separately."
+    )
+
+    add_heading(doc, "6.1 Key Performance Indicators (KPIs)", level=2)
+    add_table(doc, ["KPI", "Definition", "Initial Target / Alert Rule", "Frequency"], [
+        ("API availability", "Successful health checks divided by total scheduled checks.", "Target at least 99.5% monthly for an initial production service, subject to business needs.", "Every 1–5 minutes"),
+        ("Prediction latency", "Time from valid request to prediction response.", "Establish baseline; alert when p95 exceeds 2 seconds for synchronous requests, unless requirements differ.", "Continuous"),
+        ("Error rate", "Failed requests divided by total requests.", "Investigate if above 1% over a rolling 15-minute window.", "Continuous"),
+        ("Data completeness", "Share of required feature values present and valid.", "Target at least 98%; reject or flag records with missing critical fields.", "Every ingestion batch"),
+        ("Schema validity", "Share of records conforming to expected types, fields, and units.", "Target 100% for accepted records; quarantine invalid records.", "Every ingestion batch"),
+        ("Input drift", "Change in feature distributions relative to the approved reference dataset.", "Investigate significant drift, for example population stability index above 0.2; calibrate thresholds to data.", "Weekly and per batch"),
+        ("Prediction drift", "Change in predicted-yield distribution over time or across regions.", "Alert on sustained changes outside expected seasonal and regional ranges.", "Daily or weekly"),
+        ("MAE", "Mean absolute error between predictions and observed yield.", "Set crop- and region-specific limits from validation; review if exceeded.", "When labels arrive"),
+        ("RMSE", "Root mean squared error, which emphasizes larger prediction errors.", "Compare with the validated baseline and historical seasonal variability.", "When labels arrive"),
+        ("R²", "Proportion of outcome variance explained by the model on an evaluation dataset.", "Use as a secondary metric; investigate sustained decline from validation baseline.", "When labels arrive"),
+        ("Resource utilization", "CPU, memory, storage, and queue utilization.", "Alert when sustained utilization exceeds 80% or capacity limits approach.", "Continuous"),
+        ("User feedback", "Reports of implausible estimates, data errors, and usability issues.", "Review all high-severity reports and recurring complaints.", "Weekly"),
+        ("Cost per prediction", "Operational infrastructure cost divided by successful predictions.", "Track against an approved monthly budget.", "Monthly")
+    ])
+
+    add_heading(doc, "6.2 Performance Evaluation", level=2)
+    add_bullets(doc, [
+        "Use MAE and RMSE in the crop-yield unit to communicate the typical scale of prediction errors.",
+        "Use R² as a complementary measure rather than relying on it alone.",
+        "Evaluate performance separately by crop, region, season, farm size, and relevant production conditions where sufficient data exist.",
+        "Use chronological or season-based holdout evaluation to reduce the risk of training on future information.",
+        "Compare the production model with a simple baseline, such as historical regional average yield, when appropriate.",
+        "Track both overall performance and large errors that could materially affect agricultural decisions.",
+        "Record actual yield only after verification, with provenance and units, and use delayed labels to assess seasonal performance."
+    ])
+
+    add_heading(doc, "6.3 Data Refresh Strategy", level=2)
+    add_table(doc, ["Data Type", "Suggested Refresh", "Validation and Handling"], [
+        ("Weather observations", "Daily or as the source u
