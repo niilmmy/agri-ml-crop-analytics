@@ -1,0 +1,306 @@
+# Week 4: Model Evaluation and Optimization Strategy
+# Agricultural Crop Yield Prediction
+
+import json
+import numpy as np
+import pandas as pd
+import joblib
+
+from pathlib import Path
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score
+)
+from sklearn.model_selection import (
+    TimeSeriesSplit,
+    RandomizedSearchCV
+)
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+# --------------------------------------------------
+# 1. Load and validate dataset
+# --------------------------------------------------
+
+DATA_PATH = "data/agricultural_data.csv"
+TARGET = "crop_yield_tonnes"
+YEAR_COLUMN = "season_year"
+
+OUTPUT_DIR = Path("evaluation_results")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+df = pd.read_csv(DATA_PATH)
+df.columns = df.columns.str.strip().str.lower()
+
+if TARGET not in df.columns:
+    raise ValueError(f"Missing target column: {TARGET}")
+
+if YEAR_COLUMN not in df.columns:
+    raise ValueError(f"Missing temporal column: {YEAR_COLUMN}")
+
+df = df.drop_duplicates()
+df[TARGET] = pd.to_numeric(df[TARGET], errors="coerce")
+df = df.replace([np.inf, -np.inf], np.nan)
+df = df.dropna(subset=[TARGET, YEAR_COLUMN])
+df = df[df[TARGET] >= 0].copy()
+
+# --------------------------------------------------
+# 2. Define features
+# --------------------------------------------------
+
+numeric_features = [
+    "soil_ph",
+    "soil_moisture",
+    "nitrogen",
+    "phosphorus",
+    "potassium",
+    "rainfall_mm",
+    "temperature_c",
+    "humidity",
+    "irrigation_mm",
+    "fertilizer_kg",
+    "cultivated_area_hectares",
+]
+
+categorical_features = ["crop", "district"]
+
+numeric_features = [
+    c for c in numeric_features
+    if c in df.columns and c != TARGET
+]
+
+categorical_features = [
+    c for c in categorical_features
+    if c in df.columns and c != TARGET
+]
+
+features = numeric_features + categorical_features
+
+if not features:
+    raise ValueError("No valid feature columns found.")
+
+for col in numeric_features:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+df = df.replace([np.inf, -np.inf], np.nan)
+df = df.dropna(subset=[YEAR_COLUMN])
+
+# --------------------------------------------------
+# 3. Chronological train-test split
+# --------------------------------------------------
+
+df = df.sort_values(YEAR_COLUMN).reset_index(drop=True)
+
+years = np.sort(df[YEAR_COLUMN].unique())
+
+if len(years) < 3:
+    raise ValueError(
+        "At least three distinct seasons are recommended "
+        "for training, validation, and testing."
+    )
+
+test_year_count = max(1, int(np.ceil(len(years) * 0.2)))
+test_years = years[-test_year_count:]
+
+train_df = df[~df[YEAR_COLUMN].isin(test_years)].copy()
+test_df = df[df[YEAR_COLUMN].isin(test_years)].copy()
+
+X_train = train_df[features]
+y_train = train_df[TARGET]
+
+X_test = test_df[features]
+y_test = test_df[TARGET]
+
+# --------------------------------------------------
+# 4. Preprocessing pipeline
+# --------------------------------------------------
+
+numeric_pipeline = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler())
+])
+
+categorical_pipeline = Pipeline([
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("encoder", OneHotEncoder(handle_unknown="ignore"))
+])
+
+preprocessor = ColumnTransformer([
+    ("numeric", numeric_pipeline, numeric_features),
+    ("categorical", categorical_pipeline, categorical_features)
+])
+
+# --------------------------------------------------
+# 5. Select model and hyperparameter search space
+# --------------------------------------------------
+
+pipeline = Pipeline([
+    ("preprocessor", preprocessor),
+    ("model", RandomForestRegressor(random_state=42, n_jobs=1))
+])
+
+parameter_distributions = {
+    "model__n_estimators": [100, 200, 300, 500],
+    "model__max_depth": [None, 5, 10, 20, 30],
+    "model__min_samples_split": [2, 5, 10],
+    "model__min_samples_leaf": [1, 2, 4, 8],
+    "model__max_features": [0.5, 0.8, 1.0]
+}
+
+# Use time-aware validation on the training years only.
+cv = TimeSeriesSplit(n_splits=3)
+
+search = RandomizedSearchCV(
+    estimator=pipeline,
+    param_distributions=parameter_distributions,
+    n_iter=20,
+    scoring="neg_root_mean_squared_error",
+    cv=cv,
+    random_state=42,
+    n_jobs=-1,
+    verbose=1,
+    refit=True,
+    error_score="raise"
+)
+
+# --------------------------------------------------
+# 6. Tune hyperparameters
+# --------------------------------------------------
+
+search.fit(X_train, y_train)
+
+best_model = search.best_estimator_
+
+# --------------------------------------------------
+# 7. Evaluate final model on unseen seasons
+# --------------------------------------------------
+
+predictions = best_model.predict(X_test)
+
+mae = mean_absolute_error(y_test, predictions)
+rmse = np.sqrt(mean_squared_error(y_test, predictions))
+r2 = r2_score(y_test, predictions)
+
+target_mean = y_test.mean()
+
+# Avoid misleading percentage error when actual yield is near zero.
+normalized_rmse_pct = (
+    100 * rmse / abs(target_mean)
+    if target_mean != 0 else None
+)
+
+# --------------------------------------------------
+# 8. Compare training and testing performance
+# --------------------------------------------------
+
+train_predictions = best_model.predict(X_train)
+
+train_rmse = np.sqrt(
+    mean_squared_error(y_train, train_predictions)
+)
+
+test_rmse = rmse
+
+if test_rmse > train_rmse * 1.5:
+    diagnostic = (
+        "Possible overfitting or seasonal distribution shift. "
+        "Inspect validation scores and feature distributions."
+    )
+elif train_rmse > 0 and test_rmse < train_rmse * 1.1:
+    diagnostic = (
+        "Training and test errors are relatively close. "
+        "Check against a simple baseline for adequate fit."
+    )
+else:
+    diagnostic = (
+        "Review learning curves, residuals, and seasonal errors "
+        "to assess bias and variance."
+    )
+
+# --------------------------------------------------
+# 9. Seasonal performance analysis
+# --------------------------------------------------
+
+test_results = test_df[[YEAR_COLUMN, TARGET]].copy()
+test_results["predicted_yield"] = predictions
+test_results["residual"] = (
+    test_results[TARGET] - test_results["predicted_yield"]
+)
+
+seasonal_metrics = {}
+
+for season, group in test_results.groupby(YEAR_COLUMN):
+    seasonal_metrics[str(season)] = {
+        "mae": float(mean_absolute_error(
+            group[TARGET], group["predicted_yield"]
+        )),
+        "rmse": float(np.sqrt(mean_squared_error(
+            group[TARGET], group["predicted_yield"]
+        ))),
+        "mean_residual": float(group["residual"].mean()),
+        "sample_count": int(len(group))
+    }
+
+# --------------------------------------------------
+# 10. Define configurable evaluation thresholds
+# --------------------------------------------------
+
+# Illustrative targets only; confirm with agricultural experts.
+MAX_RMSE_PERCENT = 15.0
+MIN_R2 = 0.70
+
+threshold_checks = {
+    "rmse_percent_target_met": (
+        normalized_rmse_pct is not None
+        and normalized_rmse_pct <= MAX_RMSE_PERCENT
+    ),
+    "r2_target_met": r2 >= MIN_R2
+}
+
+# --------------------------------------------------
+# 11. Save report and optimized model
+# --------------------------------------------------
+
+report = {
+    "target": TARGET,
+    "training_rows": int(len(X_train)),
+    "testing_rows": int(len(X_test)),
+    "training_years": [str(y) for y in np.sort(
+        train_df[YEAR_COLUMN].unique()
+    )],
+    "testing_years": [str(y) for y in test_years],
+    "best_parameters": search.best_params_,
+    "cross_validation_rmse": float(-search.best_score_),
+    "test_metrics": {
+        "mae": float(mae),
+        "rmse": float(rmse),
+        "r2": float(r2),
+        "normalized_rmse_percent": (
+            float(normalized_rmse_pct)
+            if normalized_rmse_pct is not None else None
+        )
+    },
+    "threshold_checks": threshold_checks,
+    "diagnostic": diagnostic,
+    "seasonal_metrics": seasonal_metrics
+}
+
+with open(OUTPUT_DIR / "evaluation_report.json", "w") as file:
+    json.dump(report, file, indent=4)
+
+joblib.dump(
+    best_model,
+    OUTPUT_DIR / "optimized_agricultural_model.joblib"
+)
+
+test_results.to_csv(
+    OUTPUT_DIR / "test_predictions.csv",
+    index=False
+)
+
+print(json.dumps(report, indent=4))
+print("Evaluation and optimization completed.")
